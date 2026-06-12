@@ -11,20 +11,23 @@ Single-file Python CLI with resume capability. No framework, no database.
 ```
 CLI args (year, periode, emiten_type)
   → _get_session()        # requests.Session + WAF cookie + retry adapter
-  → fetch_all_results()   # paginate through IDX API, one report_type at a time
+  → fetch_all_results()   # paginate through IDX API, one (periode, report_type) at a time
   → main() loop           # iterate companies, filter attachments, download
   → save_status()         # incremental CSV writes for resume
 ```
 
+**`all` mode**: expands to `[("tw1","rdf"), ("tw2","rdf"), ("tw3","rdf"), ("","rda")]` — four sequential fetch+download jobs in one run.
+
 **API endpoint**: `GET https://www.idx.co.id/primary/ListedCompany/GetFinancialReport`
 
-**Pagination**: `indexFrom` (1-based), `pageSize` (default 100). Total pages computed from `ResultCount`.
+**Pagination**: `indexFrom` is a **1-based page number** (not a result offset). `pageSize` (default 100). Total pages computed from `ResultCount`. Cookie refreshed every 10 pages and on 403 retry.
 
-**Resume**: `idx_companies.csv` tracks `(code, report_type, status)`. On re-run, `load_done()` builds a set of completed pairs; those companies are skipped. CSV is written incrementally after each successful company.
+**Resume key**: `(code, report_type, periode, year)` — a 4-tuple. `idx_companies.csv` columns: `code`, `company`, `report_type`, `periode`, `year`, `status`. CSV written incrementally after each successful company. `load_done()` tolerates old CSVs missing `periode`/`year` columns (backward compat).
 
 **Anti-bot measures**:
 - Browser-like headers (`User-Agent`, `Referer`, `Origin`)
 - WAF cookie obtained by visiting the referer page first (`stream=True`, short timeout)
+- Cookie refreshed mid-run (every 10 pages, and on 403 retry)
 - Jittered delays between pages, companies, and attachments (configurable via `.env`)
 
 ## Key Directories
@@ -35,7 +38,7 @@ CLI args (year, periode, emiten_type)
 ├── requirements.txt     # pandas, requests, tqdm
 ├── .env.example         # Documented config overrides
 ├── idx_companies.csv    # Resume file (gitignored)
-├── download/            # Output: {code}/{year}/{report_type}/{filename} (gitignored)
+├── download/            # Output: {code}/{year}/{periode}/{report_type}/{filename} (gitignored)
 └── README.md
 ```
 
@@ -43,8 +46,10 @@ CLI args (year, periode, emiten_type)
 
 ```bash
 pip install -r requirements.txt
-python main.py 2026 tw1 s          # Q1 2026, stock issuers (both rdf + rda)
-python main.py 2026 tahunan s      # Annual reports only
+python main.py 2026 all s       # All quarters + annual for 2026
+python main.py 2026 tw1 s       # Just Q1 2026 (rdf + rda)
+python main.py 2025 all s       # 2025 — tracked independently from 2026
+python main.py 2026 tahunan s   # Annual reports only
 ```
 
 No build, lint, or test tooling — single-file script.
@@ -59,7 +64,7 @@ Everything lives in `main.py` with clear section separators:
 
 ```
 # Configuration (defaults; override via .env)
-# Helpers (_jitter, _get_session, _load_env)
+# Helpers (_jitter, _refresh_cookie, _get_session, _load_env)
 # API fetching (build_params, fetch_page, fetch_all_results)
 # Filtering & downloading (is_report_file, download_file)
 # Resume / progress tracking (save_status, load_done)
@@ -68,7 +73,7 @@ Everything lives in `main.py` with clear section separators:
 
 ### Session reuse
 
-One `requests.Session` for the entire run — cookie persistence, connection pooling, retry adapter with exponential backoff on `[429, 500, 502, 503, 504]`.
+One `requests.Session` for the entire run — cookie persistence, connection pooling, retry adapter with exponential backoff on `[429, 500, 502, 503, 504]`. Cookie refreshed every 10 API pages and on any 403 response.
 
 ### Jittered delays
 
@@ -83,16 +88,18 @@ Pure stdlib parser — no `python-dotenv` dependency. Reads `KEY=VALUE` lines, s
 
 ### CSV format
 
-`idx_companies.csv`: `code,company,report_type,status`. `code` = emiten code (key), `company` = real name from API (`NamaEmiten`). `_load_done()` handles both old (`company`) and new (`code`) column names for backward compat.
+`idx_companies.csv`: `code, company, report_type, periode, year, status`.
+
+`code` = emiten code (key), `company` = real name from API (`NamaEmiten`). `load_done()` handles backward compat: tolerates missing `periode`/`year` columns and old `company`-as-code format.
 
 ### Error handling
 
-Individual download failures log with `tqdm.write()` but don't crash the run. API errors propagate (`raise_for_status()`). WAF cookie pre-fetch failure is silently swallowed (API might still work).
+Individual download failures log with `tqdm.write()` but don't crash the run. API errors propagate (`raise_for_status()`). WAF cookie pre-fetch failure is silently swallowed. 403 on API calls triggers a cookie refresh and retry.
 
 ### Filtering logic
 
 - `rda` (annual report): download **all** attachments
-- `rdf` (quarterly financial): download if filename matches `LK_KEYWORDS` (Indonesian financial report terms) **or** ends with `.zip` (XBRL instance data)
+- `rdf` (quarterly financial): download if filename matches `LK_KEYWORDS` (Indonesian financial report terms) **or** ends with `.zip`, `.xls`, or `.xlsx`
 
 ## Important Files
 
@@ -116,8 +123,8 @@ Individual download failures log with `tqdm.write()` but don't crash the run. AP
 
 | Type | Use for |
 |---|---|
-| `feat` | New features (e.g., scraper rewrite, new report type support) |
-| `fix` | Bug fixes |
+| `feat` | New features (e.g., `all` mode, year column, ZIP support) |
+| `fix` | Bug fixes (e.g., `indexFrom` pagination fix) |
 | `docs` | README, AGENTS.md, docstrings, comments |
 | `chore` | Config, dependencies, gitignore, .env, cleanup |
 | `refactor` | Code restructuring without behavior change |
@@ -130,20 +137,18 @@ Individual download failures log with `tqdm.write()` but don't crash the run. AP
 
 Example history:
 ```
-chore: remove obsolete scraper.py and .vscode
-chore: add .gitignore for download artifacts and .env
-chore: remove selenium dependency from requirements
-chore: add .env.example with documented config overrides
-feat: rewrite scraper with paginated API, rdf+rda, ZIP support, and jittered delays
-docs: rewrite README in English with usage guide and API docs
-docs: add AGENTS.md with repository guidelines
+fix: use page number for indexFrom instead of result offset
+feat: add 'all' mode to fetch tw1+tw2+tw3 (rdf) + annual (rda) in one run
+feat: include periode in resume key, download path, and CSV; add XLS/XLSX support
+feat: add year column to resume CSV so multiple years can be tracked independently
 ```
 
 ## Testing & QA
 
 No test framework. Manual QA:
 1. Run with a limited page size (`PAGE_SIZE=2` in `.env` or source)
-2. Verify `idx_companies.csv` has correct `code` + `company` columns
-3. Verify `download/{code}/{year}/{report_type}/` structure
-4. Verify ZIP files (`instance.zip`, `inlineXBRL.zip`) are downloaded alongside PDFs
-5. Kill mid-run, re-run — confirm resume skips already-done companies
+2. Verify `idx_companies.csv` has columns: `code`, `company`, `report_type`, `periode`, `year`, `status`
+3. Verify `download/{code}/{year}/{periode}/{report_type}/` structure
+4. Verify ZIP and XLS/XLSX files are downloaded alongside PDFs
+5. Kill mid-run, re-run — confirm resume skips already-done `(code, report_type, periode, year)` tuples
+6. Run a different `year` — confirm it starts fresh without blocking the previous year
