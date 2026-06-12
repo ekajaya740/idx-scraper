@@ -128,12 +128,20 @@ def jitter(delay_range):
     time.sleep(random.uniform(*delay_range))
 
 
-def _get_session():
-    """Create a requests.Session with browser headers and WAF cookie.
+def _refresh_cookie(session):
+    """Re-visit the referer page to obtain a fresh WAF cookie."""
+    try:
+        session.get(
+            "https://www.idx.co.id/id/perusahaan-tercatat/laporan-keuangan-dan-tahunan",
+            timeout=15,
+            stream=True,
+        )
+    except requests.RequestException:
+        pass
 
-    The IDX site uses a WAF that sets a cookie on first visit. We hit the
-    referer page first to obtain it before calling the API.
-    """
+
+def _get_session():
+    """Create a requests.Session with browser headers and WAF cookie."""
     session = requests.Session()
     session.headers.update(HEADERS)
     adapter = requests.adapters.HTTPAdapter(
@@ -144,26 +152,17 @@ def _get_session():
         )
     )
     session.mount("https://", adapter)
-
-    try:
-        session.get(
-            "https://www.idx.co.id/id/perusahaan-tercatat/laporan-keuangan-dan-tahunan",
-            timeout=15,
-            stream=True,
-        )
-    except requests.RequestException:
-        pass
-
+    _refresh_cookie(session)
     return session
 
 
-def build_params(year, periode, emiten_type, index_from, report_type):
+def build_params(year, periode, emiten_type, page, report_type):
     """Build query parameters for the IDX API.
 
-    For rda (annual report), periode is sent empty since the API ignores it.
+    indexFrom is a 1-based page number, NOT a result offset.
     """
     return {
-        "indexFrom": index_from,
+        "indexFrom": page,
         "pageSize": PAGE_SIZE,
         "year": year,
         "reportType": report_type,
@@ -179,14 +178,15 @@ def build_params(year, periode, emiten_type, index_from, report_type):
 # ---------------------------------------------------------------------------
 
 
-def fetch_page(session, year, periode, emiten_type, index_from, report_type):
-    """Fetch a single page of results from the IDX API."""
-    params = build_params(year, periode, emiten_type, index_from, report_type)
+def fetch_page(session, year, periode, emiten_type, page, report_type):
+    """Fetch a single page of results, refreshing cookie on 403."""
+    params = build_params(year, periode, emiten_type, page, report_type)
     resp = session.get(IDX_API_URL, params=params, timeout=30)
+    if resp.status_code == 403:
+        _refresh_cookie(session)
+        resp = session.get(IDX_API_URL, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
-
-
 def fetch_all_results(session, year, periode, emiten_type, report_type):
     """Paginate through all results; return a flat list of company entries."""
     first_page = fetch_page(session, year, periode, emiten_type, 1, report_type)
@@ -196,14 +196,22 @@ def fetch_all_results(session, year, periode, emiten_type, report_type):
     all_results = list(first_page["Results"])
 
     total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
-    for page in range(2, total_pages + 1):
+    pbar = tqdm(
+        range(2, total_pages + 1),
+        desc=f"  Pages {report_type}",
+        initial=1,
+        total=total_pages,
+        unit="pg",
+    )
+    for page in pbar:
         jitter(DELAY_PAGE)
-        index_from = (page - 1) * PAGE_SIZE + 1
-        data = fetch_page(session, year, periode, emiten_type, index_from, report_type)
+        data = fetch_page(session, year, periode, emiten_type, page, report_type)
         all_results.extend(data["Results"])
+        pbar.set_postfix_str(f"{len(all_results)}/{total}")
+        if page % 10 == 0:
+            _refresh_cookie(session)
 
     return all_results
-
 # ---------------------------------------------------------------------------
 # Filtering & downloading
 # ---------------------------------------------------------------------------
