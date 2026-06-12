@@ -1,25 +1,25 @@
 """
 IDX Financial Report Scraper
 
-Fetches financial reports (rdf) and annual reports (rda) from the Indonesia
-Stock Exchange (IDX) API and downloads matching PDF, XLSX, and ZIP attachments.
+Fetches quarterly financial reports (rdf) and annual reports (rda) from the
+Indonesia Stock Exchange API and downloads PDF, XLSX, and ZIP attachments.
 
 Usage:
     python main.py <year> <periode> [emiten_type]
 
     year          : report year (e.g. 2026)
-    periode       : tw1 | tw2 | tw3 | tahunan
+    periode       : tw1 | tw2 | tw3 | tahunan | all
+                    'all' fetches tw1+tw2+tw3 (rdf) + annual (rda)
     emiten_type   : s (saham/stock, default) | o (obligasi/bonds)
 
 API endpoint:
     GET https://www.idx.co.id/primary/ListedCompany/GetFinancialReport
-    Params: indexFrom, pageSize, year, reportType (rdf|rda), EmitenType,
-            periode, kodeEmiten, SortColumn, SortOrder
+    Params: indexFrom (page number), pageSize, year, reportType (rdf|rda),
+            EmitenType, periode, kodeEmiten, SortColumn, SortOrder
 
-Resume: tracks progress in 'status perusahaan.csv' — interrupted runs skip
-already-downloaded (company, report_type) pairs.
+Resume: tracks progress in 'idx_companies.csv' — interrupted runs skip
+already-downloaded (code, report_type) pairs.
 """
-
 import os
 import random
 import sys
@@ -276,7 +276,7 @@ def load_done():
 def main():
     if len(sys.argv) < 3:
         print("Usage: python main.py <year> <periode> [emiten_type]")
-        print("  periode    : tw1 | tw2 | tw3 | tahunan")
+        print("  periode    : tw1 | tw2 | tw3 | tahunan | all")
         print("  emiten_type: s (default) | o")
         sys.exit(1)
 
@@ -284,32 +284,43 @@ def main():
     periode = sys.argv[2]
     emiten_type = sys.argv[3] if len(sys.argv) > 3 else "s"
 
-    print(f"Fetching: year={year}  periode={periode}  emiten_type={emiten_type}")
+    # Build work list: (periode, report_type) pairs
+    if periode == "all":
+        work = [("tw1", "rdf"), ("tw2", "rdf"), ("tw3", "rdf"), ("", "rda")]
+    else:
+        work = []
+        if periode in ("tw1", "tw2", "tw3"):
+            work.append((periode, "rdf"))
+        work.append(("" if periode == "tahunan" else periode, "rda"))
 
+    print(f"Year: {year}  emiten_type: {emiten_type}")
+    job_desc = ", ".join(f"{p or 'rda'}/{rt}" for p, rt in work)
+    print(f"Jobs: {len(work)} ({job_desc})")
     session = _get_session()
     done = load_done()
-    # Rebuild status lists from done set for incremental CSV writes
+
     codes, names, types, statuses = [], [], [], []
     for c, rt in done:
         codes.append(c)
-        names.append("")  # real name not known for resumed entries
+        names.append("")
         types.append(rt)
         statuses.append(True)
 
-    for report_type in REPORT_TYPES:
-        results = fetch_all_results(session, year, periode, emiten_type, report_type)
-        print(f"\n[{report_type}] Total companies: {len(results)}")
+    for peri, rt in work:
+        label = f"{peri}/{rt}" if peri else rt
+        results = fetch_all_results(session, year, peri, emiten_type, rt)
+        print(f"\n[{label}] Total companies: {len(results)}")
 
         pending = [
-            (r, report_type)
+            (r, rt)
             for r in results
-            if (r["KodeEmiten"], report_type) not in done
+            if (r["KodeEmiten"], rt) not in done
         ]
         already = len(results) - len(pending)
-        print(f"[{report_type}] Already done: {already}, remaining: {len(pending)}")
+        print(f"[{label}] Already done: {already}, remaining: {len(pending)}")
 
-        pbar = tqdm(pending, desc=f"Downloading {report_type}")
-        for entry, rt in pbar:
+        pbar = tqdm(pending, desc=f"  Downloading {label}")
+        for entry, rtype in pbar:
             jitter(DELAY_COMPANY)
             code = entry["KodeEmiten"]
             name = entry["NamaEmiten"]
@@ -317,14 +328,14 @@ def main():
             ok = False
             codes.append(code)
             names.append(name)
-            types.append(rt)
+            types.append(rtype)
 
             for attachment in entry.get("Attachments", []):
                 fname = attachment["File_Name"]
-                if is_report_file(fname, rt):
+                if is_report_file(fname, rtype):
                     try:
                         jitter(DELAY_ATTACHMENT)
-                        download_file(session, code, year, rt, attachment["File_Path"])
+                        download_file(session, code, year, rtype, attachment["File_Path"])
                         ok = True
                     except requests.RequestException as e:
                         tqdm.write(f"  [{code}] Failed: {fname} — {e}")
