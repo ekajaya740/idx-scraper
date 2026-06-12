@@ -51,11 +51,12 @@ Files are saved to:
 download/
   {code}/
     {year}/
-      rdf/
-        file.pdf
-        instance.zip
-      rda/
-        annual-report.pdf
+      {periode}/
+        rdf/
+          file.pdf
+          instance.zip
+        rda/
+          annual-report.pdf
 ```
 
 ## Resume

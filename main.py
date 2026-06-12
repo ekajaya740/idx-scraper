@@ -221,21 +221,23 @@ def is_report_file(filename, report_type):
     """Decide whether a file should be downloaded.
 
     rda (annual report) → download everything.
-    rdf (quarterly financial) → match keywords (PDF/XLSX) or .zip (XBRL).
+    rdf (quarterly financial) → match keywords (PDF) or extensions:
+      .zip  → XBRL instance data
+      .xls, .xlsx → spreadsheet
     """
     if report_type == "rda":
         return True
     lower = filename.lower()
-    if lower.endswith(".zip"):
+    if lower.endswith((".zip", ".xls", ".xlsx")):
         return True
     return any(kw in lower for kw in LK_KEYWORDS)
 
 
-def download_file(session, company_code, year, report_type, file_path):
-    """Download a file into download/{kode}/{year}/{report_type}/{filename}."""
+def download_file(session, company_code, year, periode, report_type, file_path):
+    """Download a file into download/{kode}/{year}/{periode}/{report_type}/{filename}."""
     cwd = os.path.dirname(os.path.realpath(__file__))
     filename = file_path.rsplit("/", 1)[-1]
-    local_path = os.path.join(cwd, DOWNLOAD_DIR, company_code, year, report_type, filename)
+    local_path = os.path.join(cwd, DOWNLOAD_DIR, company_code, year, periode, report_type, filename)
 
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
     full_url = urljoin(IDX_BASE_URL, file_path)
@@ -252,21 +254,22 @@ def download_file(session, company_code, year, report_type, file_path):
 def save_status(rows):
     """Persist download progress to CSV.
 
-    Columns: code (emiten code), company (real name), report_type, status.
+    Columns: code, company, report_type, periode, status.
     """
     df = pd.DataFrame.from_dict(rows)
     df.to_csv(STATUS_CSV, index=False)
 
 
 def load_done():
-    """Return set of (code, report_type) pairs already downloaded."""
+    """Return set of (code, report_type, periode) triples already downloaded."""
     if not os.path.exists(STATUS_CSV):
         return set()
     df = pd.read_csv(STATUS_CSV)
-    # Support both old (company=code) and new (code+company) formats
     code_col = "code" if "code" in df.columns else "company"
     df = df[df["status"] == True]
-    return set(zip(df[code_col], df["report_type"]))
+    # Build triples; tolerate missing periode column in old CSVs
+    peri_col = df["periode"] if "periode" in df.columns else ""
+    return set(zip(df[code_col], df["report_type"], peri_col))
 
 # ---------------------------------------------------------------------------
 # Main
@@ -299,11 +302,17 @@ def main():
     session = _get_session()
     done = load_done()
 
-    codes, names, types, statuses = [], [], [], []
-    for c, rt in done:
+    codes, names, types, peris, statuses = [], [], [], [], []
+    for item in done:
+        if len(item) == 3:
+            c, rt, pr = item
+        else:
+            c, rt = item
+            pr = ""
         codes.append(c)
         names.append("")
         types.append(rt)
+        peris.append(pr)
         statuses.append(True)
 
     for peri, rt in work:
@@ -312,15 +321,15 @@ def main():
         print(f"\n[{label}] Total companies: {len(results)}")
 
         pending = [
-            (r, rt)
+            (r, rt, peri)
             for r in results
-            if (r["KodeEmiten"], rt) not in done
+            if (r["KodeEmiten"], rt, peri) not in done
         ]
         already = len(results) - len(pending)
         print(f"[{label}] Already done: {already}, remaining: {len(pending)}")
 
         pbar = tqdm(pending, desc=f"  Downloading {label}")
-        for entry, rtype in pbar:
+        for entry, rtype, pr in pbar:
             jitter(DELAY_COMPANY)
             code = entry["KodeEmiten"]
             name = entry["NamaEmiten"]
@@ -329,13 +338,14 @@ def main():
             codes.append(code)
             names.append(name)
             types.append(rtype)
+            peris.append(pr)
 
             for attachment in entry.get("Attachments", []):
                 fname = attachment["File_Name"]
                 if is_report_file(fname, rtype):
                     try:
                         jitter(DELAY_ATTACHMENT)
-                        download_file(session, code, year, rtype, attachment["File_Path"])
+                        download_file(session, code, year, pr, rtype, attachment["File_Path"])
                         ok = True
                     except requests.RequestException as e:
                         tqdm.write(f"  [{code}] Failed: {fname} — {e}")
@@ -347,6 +357,7 @@ def main():
                     "code": codes,
                     "company": names,
                     "report_type": types,
+                    "periode": peris,
                     "status": statuses,
                 })
 
