@@ -110,6 +110,35 @@ Individual download failures log with `tqdm.write()` but don't crash the run. AP
 - **No virtual env enforced** — use at your discretion
 - **No type checking**, **no linting**, **no tests** — single-use scraper script
 
+## Git Conventions
+
+**Conventional Commits** — every commit follows `<type>: <description>`:
+
+| Type | Use for |
+|---|---|
+| `feat` | New features (e.g., scraper rewrite, new report type support) |
+| `fix` | Bug fixes |
+| `docs` | README, AGENTS.md, docstrings, comments |
+| `chore` | Config, dependencies, gitignore, .env, cleanup |
+| `refactor` | Code restructuring without behavior change |
+
+**Rules**:
+- Commit files **one by one** — each commit touches one logical group
+- Never mix `feat` and `chore` in the same commit
+- Push to `main` after all commits are ready
+- Description is lowercase, imperative mood, no period at the end
+
+Example history:
+```
+chore: remove obsolete scraper.py and .vscode
+chore: add .gitignore for download artifacts and .env
+chore: remove selenium dependency from requirements
+chore: add .env.example with documented config overrides
+feat: rewrite scraper with paginated API, rdf+rda, ZIP support, and jittered delays
+docs: rewrite README in English with usage guide and API docs
+docs: add AGENTS.md with repository guidelines
+```
+
 ## Testing & QA
 
 No test framework. Manual QA:
