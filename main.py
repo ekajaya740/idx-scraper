@@ -254,22 +254,22 @@ def download_file(session, company_code, year, periode, report_type, file_path):
 def save_status(rows):
     """Persist download progress to CSV.
 
-    Columns: code, company, report_type, periode, status.
+    Columns: code, company, report_type, periode, year, status.
     """
     df = pd.DataFrame.from_dict(rows)
     df.to_csv(STATUS_CSV, index=False)
 
 
 def load_done():
-    """Return set of (code, report_type, periode) triples already downloaded."""
+    """Return set of (code, report_type, periode, year) already downloaded."""
     if not os.path.exists(STATUS_CSV):
         return set()
     df = pd.read_csv(STATUS_CSV)
     code_col = "code" if "code" in df.columns else "company"
     df = df[df["status"] == True]
-    # Build triples; tolerate missing periode column in old CSVs
     peri_col = df["periode"] if "periode" in df.columns else ""
-    return set(zip(df[code_col], df["report_type"], peri_col))
+    year_col = df["year"] if "year" in df.columns else ""
+    return set(zip(df[code_col], df["report_type"], peri_col, year_col))
 
 # ---------------------------------------------------------------------------
 # Main
@@ -302,17 +302,21 @@ def main():
     session = _get_session()
     done = load_done()
 
-    codes, names, types, peris, statuses = [], [], [], [], []
+    codes, names, types, peris, years, statuses = [], [], [], [], [], []
     for item in done:
-        if len(item) == 3:
+        if len(item) == 4:
+            c, rt, pr, yr = item
+        elif len(item) == 3:
             c, rt, pr = item
+            yr = ""
         else:
             c, rt = item
-            pr = ""
+            pr, yr = "", ""
         codes.append(c)
         names.append("")
         types.append(rt)
         peris.append(pr)
+        years.append(yr)
         statuses.append(True)
 
     for peri, rt in work:
@@ -321,15 +325,15 @@ def main():
         print(f"\n[{label}] Total companies: {len(results)}")
 
         pending = [
-            (r, rt, peri)
+            (r, rt, peri, year)
             for r in results
-            if (r["KodeEmiten"], rt, peri) not in done
+            if (r["KodeEmiten"], rt, peri, year) not in done
         ]
         already = len(results) - len(pending)
         print(f"[{label}] Already done: {already}, remaining: {len(pending)}")
 
         pbar = tqdm(pending, desc=f"  Downloading {label}")
-        for entry, rtype, pr in pbar:
+        for entry, rtype, pr, yr in pbar:
             jitter(DELAY_COMPANY)
             code = entry["KodeEmiten"]
             name = entry["NamaEmiten"]
@@ -339,6 +343,7 @@ def main():
             names.append(name)
             types.append(rtype)
             peris.append(pr)
+            years.append(yr)
 
             for attachment in entry.get("Attachments", []):
                 fname = attachment["File_Name"]
@@ -358,10 +363,9 @@ def main():
                     "company": names,
                     "report_type": types,
                     "periode": peris,
+                    "year": years,
                     "status": statuses,
                 })
-
-    print("Done.")
 
 
 if __name__ == "__main__":
